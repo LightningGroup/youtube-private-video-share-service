@@ -4,11 +4,20 @@ const { runYoutubeStudioShare } = require('./youtubeStudioShare');
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{6,20}$/;
 const LOCALES = new Set(['auto', 'ko', 'en']);
+const JOB_STATUS = {
+  SUCCESS: 'success',
+  PARTIAL: 'partial',
+  FAILED: 'failed',
+};
 
 function normalizeArray(values) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
+/**
+ * 공유 요청 payload를 정규화하고 유효성 검증한다.
+ * 라우트에서 job enqueue 직전에 호출한다.
+ */
 function validateShareRequest(body) {
   if (!body || typeof body !== 'object') {
     const error = new Error('Request body is required');
@@ -65,6 +74,10 @@ function validateShareRequest(body) {
   };
 }
 
+/**
+ * 공유 작업 결과를 집계해 최종 job 상태를 확정한다.
+ * 큐 워커에서 실제 YouTube Studio 자동화 실행 시 사용한다.
+ */
 async function runShareJob(job) {
   const request = job.request;
   const storageStatePath = await sessionService.getStorageStatePathOrThrow();
@@ -77,11 +90,12 @@ async function runShareJob(job) {
   const successCount = results.filter((item) => item.status === 'success').length;
   const failedCount = results.length - successCount;
 
-  let status = 'success';
+  let status = JOB_STATUS.SUCCESS;
   if (failedCount > 0 && successCount > 0) {
-    status = 'partial';
-  } else if (failedCount === results.length) {
-    status = 'failed';
+    status = JOB_STATUS.PARTIAL;
+  }
+  if (failedCount === results.length) {
+    status = JOB_STATUS.FAILED;
   }
 
   return {

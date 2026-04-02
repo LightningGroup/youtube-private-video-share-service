@@ -12,6 +12,22 @@ const UI = {
   notifyCheckboxLabels: [/notify via email/i, /이메일로 알림/],
   saveButtons: [/done/i, /save/i, /완료/, /저장/],
 };
+const STUDIO_HOME_URL = 'https://studio.youtube.com/';
+const STUDIO_VIDEO_EDIT_URL = 'https://studio.youtube.com/video';
+const PAGE_TIMEOUT_MS = 60000;
+const PANEL_WAIT_MS = 1500;
+const DRY_RUN_ADDED_COUNT = 0;
+const DEFAULT_ADDED_COUNT = 0;
+
+function buildSuccessResult({ videoId, payload }) {
+  return {
+    videoId,
+    status: 'success',
+    addedCount: payload.dryRun ? DRY_RUN_ADDED_COUNT : payload.emails.length,
+    message: payload.dryRun ? 'Dry run completed' : 'Invites updated',
+    artifacts: [],
+  };
+}
 
 function maskEmail(email) {
   const [name, domain] = email.split('@');
@@ -28,7 +44,7 @@ async function firstVisible(locatorCandidates) {
   return null;
 }
 
-async function saveArtifacts(page, jobId, videoId, prefix) {
+async function saveArtifacts({ page, jobId, videoId, prefix }) {
   const dir = path.join(config.artifactsDir, jobId);
   await ensureDir(dir);
 
@@ -75,7 +91,7 @@ async function openShareDialog(page, logger) {
   logger.info('Opened share privately dialog');
 }
 
-async function addEmails(page, emails, logger, dryRun) {
+async function addEmails({ page, emails, logger, dryRun }) {
   if (dryRun) {
     logger.info(`Dry run: would add ${emails.length} emails`);
     return;
@@ -105,7 +121,7 @@ async function addEmails(page, emails, logger, dryRun) {
   }
 }
 
-async function setNotifyEmail(page, disableEmailNotification, logger, dryRun) {
+async function setNotifyEmail({ page, disableEmailNotification, logger, dryRun }) {
   if (dryRun) {
     logger.info(`Dry run: would set disableEmailNotification=${disableEmailNotification}`);
     return;
@@ -127,7 +143,7 @@ async function setNotifyEmail(page, disableEmailNotification, logger, dryRun) {
   logger.warn('Notification checkbox not found; skipped');
 }
 
-async function commitSave(page, dryRun, logger) {
+async function commitSave({ page, dryRun, logger }) {
   if (dryRun) {
     logger.info('Dry run: skipped save action');
     return;
@@ -145,13 +161,13 @@ async function commitSave(page, dryRun, logger) {
   logger.warn('Could not find save/done button');
 }
 
-async function processVideo(page, job, payload, videoId) {
+async function processVideo({ page, payload, videoId }) {
   const { logger } = payload;
-  const url = `https://studio.youtube.com/video/${encodeURIComponent(videoId)}/edit`;
+  const url = `${STUDIO_VIDEO_EDIT_URL}/${encodeURIComponent(videoId)}/edit`;
   logger.info(`Opening Studio page for video ${videoId}`);
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
 
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(PANEL_WAIT_MS);
   await openVisibilityPanel(page, logger);
 
   let privateFound = false;
@@ -164,24 +180,36 @@ async function processVideo(page, job, payload, videoId) {
 
   if (!privateFound) {
     logger.warn('Private indicator not explicitly found, continuing cautiously');
-  } else {
-    logger.info('Private visibility indicator found');
+    await openShareDialog(page, logger);
+    await addEmails({ page, emails: payload.emails, logger, dryRun: payload.dryRun });
+    await setNotifyEmail({
+      page,
+      disableEmailNotification: payload.disableEmailNotification,
+      logger,
+      dryRun: payload.dryRun,
+    });
+    await commitSave({ page, dryRun: payload.dryRun, logger });
+    return buildSuccessResult({ videoId, payload });
   }
 
+  logger.info('Private visibility indicator found');
   await openShareDialog(page, logger);
-  await addEmails(page, payload.emails, logger, payload.dryRun);
-  await setNotifyEmail(page, payload.disableEmailNotification, logger, payload.dryRun);
-  await commitSave(page, payload.dryRun, logger);
+  await addEmails({ page, emails: payload.emails, logger, dryRun: payload.dryRun });
+  await setNotifyEmail({
+    page,
+    disableEmailNotification: payload.disableEmailNotification,
+    logger,
+    dryRun: payload.dryRun,
+  });
+  await commitSave({ page, dryRun: payload.dryRun, logger });
 
-  return {
-    videoId,
-    status: 'success',
-    addedCount: payload.dryRun ? 0 : payload.emails.length,
-    message: payload.dryRun ? 'Dry run completed' : 'Invites updated',
-    artifacts: [],
-  };
+  return buildSuccessResult({ videoId, payload });
 }
 
+/**
+ * storageState 기반으로 YouTube Studio 비공개 공유 자동화를 수행한다.
+ * job 큐 워커에서 비디오별 결과와 아티팩트를 수집할 때 사용한다.
+ */
 async function runYoutubeStudioShare(job, options) {
   const browser = await chromium.launch({ headless: config.playwrightHeadless });
   const context = await browser.newContext({
@@ -193,7 +221,7 @@ async function runYoutubeStudioShare(job, options) {
   const results = [];
 
   try {
-    await page.goto('https://studio.youtube.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(STUDIO_HOME_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
     job.addLog('info', 'Opened Studio home page');
 
     const payload = {
@@ -208,15 +236,15 @@ async function runYoutubeStudioShare(job, options) {
 
     for (const videoId of options.videoIds) {
       try {
-        const result = await processVideo(page, job, payload, videoId);
+        const result = await processVideo({ page, payload, videoId });
         results.push(result);
       } catch (error) {
         job.addLog('error', `[${videoId}] ${error.message}`);
-        const files = await saveArtifacts(page, job.jobId, videoId, 'error');
+        const files = await saveArtifacts({ page, jobId: job.jobId, videoId, prefix: 'error' });
         results.push({
           videoId,
           status: 'failed',
-          addedCount: 0,
+          addedCount: DEFAULT_ADDED_COUNT,
           message: error.message,
           artifacts: files.map((fileName) => ({
             fileName,
