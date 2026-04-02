@@ -37,7 +37,7 @@ class SessionService {
       throw err;
     }
 
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.cookies) || !parsed.origins) {
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
       const err = new Error('storageState must include cookies and origins');
       err.status = 400;
       err.code = 'INVALID_STORAGE_STATE';
@@ -47,12 +47,20 @@ class SessionService {
     await ensureDir(path.dirname(config.storageStatePath));
     await fs.copyFile(tempFilePath, config.storageStatePath);
 
-    return this.getStatus();
+    const status = await this.getStatus();
+    return {
+      ok: true,
+      message: 'storageState uploaded',
+      ...status,
+    };
   }
 
   async deleteStorageState() {
     await deleteFile(config.storageStatePath);
-    return this.getStatus();
+    return {
+      ok: true,
+      message: 'storageState deleted',
+    };
   }
 
   async getStorageStatePathOrThrow() {
@@ -64,7 +72,7 @@ class SessionService {
     }
 
     const parsed = await readJson(config.storageStatePath);
-    if (!parsed.cookies || !parsed.origins) {
+    if (!Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
       const err = new Error('Stored storage state is invalid');
       err.status = 400;
       err.code = 'INVALID_STORAGE_STATE';
