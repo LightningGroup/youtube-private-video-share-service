@@ -9,11 +9,22 @@ const { validateShareRequest } = require('../services/shareService');
 
 const router = express.Router();
 
+function toJobListItem(job) {
+  return {
+    jobId: job.jobId,
+    status: job.status,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    summary: job.summary,
+  };
+}
+
 router.post('/jobs/share', auth, async (req, res, next) => {
   try {
     const payload = validateShareRequest(req.body);
     const queued = await jobQueue.enqueue(payload);
-    return res.status(202).json(queued);
+    return res.json(queued);
   } catch (error) {
     return next(error);
   }
@@ -23,7 +34,9 @@ router.get('/jobs', auth, async (req, res, next) => {
   try {
     const limit = Number(req.query.limit || config.jobHistoryLimit);
     const jobs = await jobStore.list(limit);
-    return res.json({ jobs });
+    return res.json({
+      items: jobs.map(toJobListItem),
+    });
   } catch (error) {
     return next(error);
   }

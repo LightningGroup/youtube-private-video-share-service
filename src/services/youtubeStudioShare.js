@@ -5,9 +5,7 @@ const config = require('../config');
 const { ensureDir } = require('../utils/fs');
 
 const UI = {
-  visibilityButtons: [
-    { role: 'button', names: [/visibility/i, /공개 상태|공개 설정|가시성/] },
-  ],
+  visibilityButtons: [/visibility/i, /가시성|공개 상태|공개 설정/],
   privateIndicators: [/private/i, /비공개/],
   sharePrivatelyEntry: [/share privately/i, /비공개로 공유/],
   emailInputLabels: [/share with people/i, /사용자와 공유/, /email/i, /이메일/],
@@ -40,6 +38,24 @@ async function saveArtifacts(page, jobId, videoId, prefix) {
   await fs.writeFile(path.join(dir, html), await page.content(), 'utf-8').catch(() => {});
 
   return [png, html];
+}
+
+async function openVisibilityPanel(page, logger) {
+  const candidates = [];
+  for (const pattern of UI.visibilityButtons) {
+    candidates.push(page.getByRole('button', { name: pattern }));
+    candidates.push(page.getByRole('link', { name: pattern }));
+    candidates.push(page.getByText(pattern));
+  }
+
+  const button = await firstVisible(candidates);
+  if (!button) {
+    logger.warn('Visibility entry point not found; continuing');
+    return;
+  }
+
+  await button.click().catch(() => {});
+  logger.info('Opened visibility section');
 }
 
 async function openShareDialog(page, logger) {
@@ -136,6 +152,7 @@ async function processVideo(page, job, payload, videoId) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
   await page.waitForTimeout(1500);
+  await openVisibilityPanel(page, logger);
 
   let privateFound = false;
   for (const pattern of UI.privateIndicators) {
@@ -159,7 +176,7 @@ async function processVideo(page, job, payload, videoId) {
   return {
     videoId,
     status: 'success',
-    addedCount: payload.emails.length,
+    addedCount: payload.dryRun ? 0 : payload.emails.length,
     message: payload.dryRun ? 'Dry run completed' : 'Invites updated',
     artifacts: [],
   };
@@ -167,7 +184,10 @@ async function processVideo(page, job, payload, videoId) {
 
 async function runYoutubeStudioShare(job, options) {
   const browser = await chromium.launch({ headless: config.playwrightHeadless });
-  const context = await browser.newContext({ storageState: options.storageStatePath });
+  const context = await browser.newContext({
+    storageState: options.storageStatePath,
+    locale: options.locale === 'auto' ? undefined : options.locale,
+  });
   const page = await context.newPage();
 
   const results = [];
