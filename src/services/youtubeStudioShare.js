@@ -18,6 +18,13 @@ const PAGE_TIMEOUT_MS = 60000;
 const PANEL_WAIT_MS = 1500;
 const DRY_RUN_ADDED_COUNT = 0;
 const DEFAULT_ADDED_COUNT = 0;
+const GOOGLE_ACCOUNTS_HOST = 'accounts.google.com';
+
+function buildAuthenticationRequiredError(message) {
+  const error = new Error(message);
+  error.code = 'AUTHENTICATION_REQUIRED';
+  return error;
+}
 
 function buildSuccessResult({ videoId, payload }) {
   return {
@@ -54,6 +61,15 @@ async function saveArtifacts({ page, jobId, videoId, prefix }) {
   await fs.writeFile(path.join(dir, html), await page.content(), 'utf-8').catch(() => {});
 
   return [png, html];
+}
+
+async function assertStudioAuthenticated(page) {
+  const currentUrl = page.url();
+  if (!currentUrl.includes(GOOGLE_ACCOUNTS_HOST)) {
+    return;
+  }
+
+  throw buildAuthenticationRequiredError('Google authentication is required again');
 }
 
 async function openVisibilityPanel(page, logger) {
@@ -166,6 +182,7 @@ async function processVideo({ page, payload, videoId }) {
   const url = `${STUDIO_VIDEO_EDIT_URL}/${encodeURIComponent(videoId)}/edit`;
   logger.info(`Opening Studio page for video ${videoId}`);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
+  await assertStudioAuthenticated(page);
 
   await page.waitForTimeout(PANEL_WAIT_MS);
   await openVisibilityPanel(page, logger);
@@ -222,6 +239,7 @@ async function runYoutubeStudioShare(job, options) {
 
   try {
     await page.goto(STUDIO_HOME_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
+    await assertStudioAuthenticated(page);
     job.addLog('info', 'Opened Studio home page');
 
     const payload = {
@@ -239,6 +257,9 @@ async function runYoutubeStudioShare(job, options) {
         const result = await processVideo({ page, payload, videoId });
         results.push(result);
       } catch (error) {
+        if (error.code === 'AUTHENTICATION_REQUIRED') {
+          throw error;
+        }
         job.addLog('error', `[${videoId}] ${error.message}`);
         const files = await saveArtifacts({ page, jobId: job.jobId, videoId, prefix: 'error' });
         results.push({

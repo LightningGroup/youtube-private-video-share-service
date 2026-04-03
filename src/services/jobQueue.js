@@ -5,12 +5,6 @@ const jobStore = require('./jobStore');
 class JobQueue {
   constructor() {
     this.queue = [];
-    this.running = false;
-    this.worker = null;
-  }
-
-  setWorker(workerFn) {
-    this.worker = workerFn;
   }
 
   async enqueue(requestPayload) {
@@ -21,6 +15,8 @@ class JobQueue {
       createdAt: now,
       startedAt: null,
       finishedAt: null,
+      claimedAt: null,
+      claimedBy: null,
       request: requestPayload,
       summary: {
         totalVideos: requestPayload.videoIds.length,
@@ -32,62 +28,81 @@ class JobQueue {
     };
 
     await jobStore.create(job);
-    this.queue.push(job.jobId);
-    this.run().catch((error) => {
-      console.error('Queue run error', error);
-    });
-
     return { jobId: job.jobId, status: 'queued' };
   }
 
-  async run() {
-    if (this.running || !this.worker) {
-      return;
+  async claim({ agentId, jobId }) {
+    const job = await jobStore.get(jobId);
+    if (!job) {
+      const error = new Error('Job not found');
+      error.status = 404;
+      error.code = 'JOB_NOT_FOUND';
+      throw error;
     }
 
-    this.running = true;
+    if (job.status !== 'queued') {
+      const error = new Error('Job is not claimable');
+      error.status = 409;
+      error.code = 'JOB_NOT_CLAIMABLE';
+      throw error;
+    }
 
-    while (this.queue.length > 0) {
-      const jobId = this.queue.shift();
-      const job = await jobStore.get(jobId);
-      if (!job) continue;
-
-      job.status = 'running';
-      job.startedAt = new Date().toISOString();
-      await jobStore.update(job);
-
-      try {
-        const updatedJob = await this.worker(this.wrapJob(job));
-        updatedJob.finishedAt = new Date().toISOString();
-        await jobStore.update(updatedJob);
-      } catch (error) {
-        job.status = 'failed';
-        job.finishedAt = new Date().toISOString();
-        job.logs.push({
+    const updatedJob = {
+      ...job,
+      status: 'claimed',
+      claimedAt: new Date().toISOString(),
+      claimedBy: agentId,
+      startedAt: new Date().toISOString(),
+      logs: [
+        ...(job.logs ?? []),
+        {
           time: new Date().toISOString(),
-          level: 'error',
-          message: `Unexpected worker error: ${error.message}`,
-        });
-        await jobStore.update(job);
-      }
+          level: 'info',
+          message: `Claimed by agent ${agentId}`,
+        },
+      ],
+    };
 
-      await this.enforceJobLimit();
-    }
-
-    this.running = false;
+    await jobStore.update(updatedJob);
+    return updatedJob;
   }
 
-  wrapJob(job) {
-    return {
+  async complete({ agentId, jobId, status, summary, results, errorCode, message }) {
+    const job = await jobStore.get(jobId);
+    if (!job) {
+      const error = new Error('Job not found');
+      error.status = 404;
+      error.code = 'JOB_NOT_FOUND';
+      throw error;
+    }
+
+    if (job.claimedBy !== agentId) {
+      const error = new Error('Job is claimed by another agent');
+      error.status = 409;
+      error.code = 'JOB_CLAIM_MISMATCH';
+      throw error;
+    }
+
+    const updatedJob = {
       ...job,
-      addLog: (level, message) => {
-        job.logs.push({
+      status,
+      finishedAt: new Date().toISOString(),
+      summary: summary || job.summary,
+      results: results || job.results,
+      logs: [
+        ...(job.logs ?? []),
+        {
           time: new Date().toISOString(),
-          level,
-          message,
-        });
-      },
+          level: status === 'failed' || status === 'needs_reauth' ? 'error' : 'info',
+          message: message || `Completed by agent ${agentId}`,
+          errorCode: errorCode || null,
+        },
+      ],
     };
+
+    await jobStore.update(updatedJob);
+    await this.enforceJobLimit();
+    return updatedJob;
   }
 
   async enforceJobLimit() {

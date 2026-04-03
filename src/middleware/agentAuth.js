@@ -1,11 +1,11 @@
 const config = require('../config');
 
-const USER_ID_HEADER = 'x-user-id';
-const DEFAULT_APP_USER_ID = 'admin';
+const AGENT_ID_HEADER = 'x-agent-id';
 
-function auth(req, res, next) {
+function agentAuth(req, res, next) {
   const authHeader = req.header('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const agentId = String(req.header(AGENT_ID_HEADER) || '').trim();
 
   if (!config.adminToken || token !== config.adminToken) {
     return res.status(401).json({
@@ -16,11 +16,17 @@ function auth(req, res, next) {
     });
   }
 
-  const requestedUserId = String(req.header(USER_ID_HEADER) || '').trim();
-  const userId = requestedUserId || DEFAULT_APP_USER_ID;
-  req.auth = { userId };
+  if (!agentId) {
+    return res.status(401).json({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Missing agent id',
+      },
+    });
+  }
 
+  req.agent = { agentId };
   return next();
 }
 
-module.exports = auth;
+module.exports = agentAuth;

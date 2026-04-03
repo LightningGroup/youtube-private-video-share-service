@@ -1,14 +1,17 @@
-const sessionService = require('./sessionService');
+const connectionService = require('./connectionService');
 const { runYoutubeStudioShare } = require('./youtubeStudioShare');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CONNECTION_ID_REGEX = /^conn_[a-z0-9]{12}$/;
 const VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{6,20}$/;
 const LOCALES = new Set(['auto', 'ko', 'en']);
 const JOB_STATUS = {
   SUCCESS: 'success',
   PARTIAL: 'partial',
   FAILED: 'failed',
+  NEEDS_REAUTH: 'needs_reauth',
 };
+const AUTHENTICATION_ERROR_CODES = new Set(['AUTHENTICATION_REQUIRED', 'CONNECTION_REAUTH_REQUIRED']);
 
 function normalizeArray(values) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
@@ -26,9 +29,17 @@ function validateShareRequest(body) {
     throw error;
   }
 
+  const connectionId = String(body.connectionId || '').trim();
   const videoIds = normalizeArray(Array.isArray(body.videoIds) ? body.videoIds : []);
   const emailsToAdd = normalizeArray(Array.isArray(body.emailsToAdd) ? body.emailsToAdd : []).map((v) => v.toLowerCase());
   const locale = body.locale || 'auto';
+
+  if (!CONNECTION_ID_REGEX.test(connectionId)) {
+    const error = new Error('connectionId is required');
+    error.status = 400;
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
 
   if (videoIds.length === 0) {
     const error = new Error('videoIds is required');
@@ -66,6 +77,7 @@ function validateShareRequest(body) {
   }
 
   return {
+    connectionId,
     videoIds,
     emailsToAdd,
     disableEmailNotification: Boolean(body.disableEmailNotification),
@@ -80,34 +92,62 @@ function validateShareRequest(body) {
  */
 async function runShareJob(job) {
   const request = job.request;
-  const storageStatePath = await sessionService.getStorageStatePathOrThrow();
+  try {
+    const { connection, storageStatePath } = await connectionService.getUsableConnectionOrThrow({
+      connectionId: request.connectionId,
+      userId: request.userId,
+    });
 
-  const results = await runYoutubeStudioShare(job, {
-    ...request,
-    storageStatePath,
-  });
+    const results = await runYoutubeStudioShare(job, {
+      ...request,
+      storageStatePath,
+      connectionId: connection.id,
+    });
 
-  const successCount = results.filter((item) => item.status === 'success').length;
-  const failedCount = results.length - successCount;
+    const successCount = results.filter((item) => item.status === 'success').length;
+    const failedCount = results.length - successCount;
 
-  let status = JOB_STATUS.SUCCESS;
-  if (failedCount > 0 && successCount > 0) {
-    status = JOB_STATUS.PARTIAL;
+    let status = JOB_STATUS.SUCCESS;
+    if (failedCount > 0 && successCount > 0) {
+      status = JOB_STATUS.PARTIAL;
+    }
+    if (failedCount === results.length) {
+      status = JOB_STATUS.FAILED;
+    }
+
+    return {
+      ...job,
+      status,
+      summary: {
+        totalVideos: request.videoIds.length,
+        successCount,
+        failedCount,
+      },
+      results,
+    };
+  } catch (error) {
+    if (!AUTHENTICATION_ERROR_CODES.has(error.code)) {
+      throw error;
+    }
+
+    await connectionService.markReauthRequired({
+      connectionId: request.connectionId,
+      userId: request.userId,
+    }).catch(() => {});
+
+    job.addLog('warn', error.message);
+
+    return {
+      ...job,
+      status: JOB_STATUS.NEEDS_REAUTH,
+      summary: {
+        totalVideos: request.videoIds.length,
+        successCount: 0,
+        failedCount: request.videoIds.length,
+      },
+      results: [],
+    };
   }
-  if (failedCount === results.length) {
-    status = JOB_STATUS.FAILED;
-  }
-
-  return {
-    ...job,
-    status,
-    summary: {
-      totalVideos: request.videoIds.length,
-      successCount,
-      failedCount,
-    },
-    results,
-  };
 }
 
 module.exports = {

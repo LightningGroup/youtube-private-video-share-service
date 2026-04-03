@@ -50,6 +50,18 @@ class JobStore {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, limit);
   }
+
+  async listByUserId(userId, limit = config.jobHistoryLimit) {
+    const jobs = await this.list(Number.MAX_SAFE_INTEGER);
+    return jobs
+      .filter((job) => job.request?.userId === userId)
+      .slice(0, limit);
+  }
+
+  async findNextQueuedJob() {
+    const jobs = await this.list(Number.MAX_SAFE_INTEGER);
+    return jobs.find((job) => job.status === 'queued') || null;
+  }
 }
 
 module.exports = new JobStore();

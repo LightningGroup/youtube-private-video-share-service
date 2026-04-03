@@ -1,24 +1,25 @@
 require('dotenv').config();
-const path = require('path');
 const app = require('./app');
 const config = require('./config');
 const { ensureDir } = require('./utils/fs');
 const sessionService = require('./services/sessionService');
 const jobStore = require('./services/jobStore');
-const jobQueue = require('./services/jobQueue');
-const { runShareJob } = require('./services/shareService');
+const connectionStore = require('./services/connectionStore');
+const loginSessionService = require('./services/loginSessionService');
 
 async function bootstrap() {
   await Promise.all([
-    ensureDir(path.dirname(config.storageStatePath)),
+    ensureDir(config.storageStatesDir),
+    ensureDir(config.connectionsDir),
+    ensureDir(config.loginSessionsDir),
     ensureDir(config.artifactsDir),
     ensureDir(config.jobsDir),
     ensureDir(config.tmpDir),
     sessionService.init(),
+    connectionStore.init(),
+    loginSessionService.init(),
     jobStore.init(),
   ]);
-
-  jobQueue.setWorker(runShareJob);
 
   app.listen(config.port, () => {
     console.log(`[${config.serviceName}] listening on port ${config.port}`);

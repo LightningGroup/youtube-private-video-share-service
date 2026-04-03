@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "interactive-login": "node scripts/interactiveLogin.js"
+    "agent": "node agent/index.js claim-and-run",
+    "interactive-login": "node scripts/interactiveLogin.js",
+    "save-storage-state-from-chrome": "node scripts/saveStorageStateFromChrome.js"
   },
   "engines": {
     "node": ">=20"
