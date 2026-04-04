@@ -5,20 +5,34 @@ const config = require('../config');
 const { ensureDir } = require('../utils/fs');
 
 const UI = {
-  visibilityButtons: [/visibility/i, /가시성|공개 상태|공개 설정/],
+  visibilityButtons: [/visibility/i, /가시성|공개 상태|공개 설정/, /동영상 공개 상태 수정/],
   privateIndicators: [/private/i, /비공개/],
-  sharePrivatelyEntry: [/share privately/i, /비공개로 공유/],
-  emailInputLabels: [/share with people/i, /사용자와 공유/, /email/i, /이메일/],
-  notifyCheckboxLabels: [/notify via email/i, /이메일로 알림/],
+  sharePrivatelyEntry: [/share privately/i, /private share/i, /비공개로 공유/, /비공개 공유/],
+  shareDialogTitles: [/share privately/i, /동영상 비공개 공유/],
+  inviteeInputLabels: [/share with people/i, /invitees?/i, /사용자와 공유/, /초대 대상자/],
+  notifyCheckboxLabels: [/notify via email/i, /email.*notification/i, /이메일.*알림/],
   saveButtons: [/done/i, /save/i, /완료/, /저장/],
 };
 const STUDIO_HOME_URL = 'https://studio.youtube.com/';
 const STUDIO_VIDEO_EDIT_URL = 'https://studio.youtube.com/video';
+const STUDIO_BROWSER_APPROVAL_QUERY = 'approve_browser_access=true';
 const PAGE_TIMEOUT_MS = 60000;
 const PANEL_WAIT_MS = 1500;
+const LOCATOR_RETRY_INTERVAL_MS = 500;
+const SHARE_DIALOG_TRIGGER_ATTEMPTS = 6;
+const SHARE_DIALOG_APPEAR_ATTEMPTS = 6;
 const DRY_RUN_ADDED_COUNT = 0;
 const DEFAULT_ADDED_COUNT = 0;
 const GOOGLE_ACCOUNTS_HOST = 'accounts.google.com';
+
+function withStudioBrowserApproval(url) {
+  if (url.includes(STUDIO_BROWSER_APPROVAL_QUERY)) {
+    return url;
+  }
+
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}${STUDIO_BROWSER_APPROVAL_QUERY}`;
+}
 
 function buildAuthenticationRequiredError(message) {
   const error = new Error(message);
@@ -42,12 +56,58 @@ function maskEmail(email) {
   return `${name.slice(0, 2)}***@${domain}`;
 }
 
+function wait(durationMs) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
+}
+
 async function firstVisible(locatorCandidates) {
   for (const locator of locatorCandidates) {
     if (await locator.first().isVisible().catch(() => false)) {
       return locator.first();
     }
   }
+  return null;
+}
+
+async function clickVisibleLocator(locatorCandidates) {
+  for (const locator of locatorCandidates) {
+    const target = locator.first();
+    if (!(await target.isVisible().catch(() => false))) {
+      continue;
+    }
+
+    try {
+      await target.click({ force: true });
+      return target;
+    } catch (error) {
+      try {
+        await target.press('Enter');
+        return target;
+      } catch (pressError) {
+        continue;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function waitForVisibleLocator(locatorCandidates, { attempts = 1, intervalMs = 0 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const visible = await firstVisible(locatorCandidates);
+    if (visible) {
+      return visible;
+    }
+
+    if (attempt === attempts - 1) {
+      return null;
+    }
+
+    await wait(intervalMs);
+  }
+
   return null;
 }
 
@@ -80,13 +140,14 @@ async function openVisibilityPanel(page, logger) {
     candidates.push(page.getByText(pattern));
   }
 
-  const button = await firstVisible(candidates);
+  candidates.unshift(page.locator('ytcp-video-metadata-visibility #select-button'));
+  const button = await clickVisibleLocator(candidates);
   if (!button) {
     logger.warn('Visibility entry point not found; continuing');
     return;
   }
 
-  await button.click().catch(() => {});
+  await page.waitForTimeout(LOCATOR_RETRY_INTERVAL_MS);
   logger.info('Opened visibility section');
 }
 
@@ -98,37 +159,67 @@ async function openShareDialog(page, logger) {
     candidates.push(page.getByText(p));
   }
 
-  const trigger = await firstVisible(candidates);
+  const trigger = await waitForVisibleLocator(candidates, {
+    attempts: SHARE_DIALOG_TRIGGER_ATTEMPTS,
+    intervalMs: LOCATOR_RETRY_INTERVAL_MS,
+  });
   if (!trigger) {
     throw new Error('Could not find Share privately entry point');
   }
 
   await trigger.click();
+  const dialog = await resolveShareDialog(page);
   logger.info('Opened share privately dialog');
+  return dialog;
 }
 
-async function addEmails({ page, emails, logger, dryRun }) {
+async function resolveShareDialog(page) {
+  const candidates = [];
+  for (const pattern of UI.shareDialogTitles) {
+    candidates.push(page.getByRole('dialog', { name: pattern }));
+  }
+
+  candidates.push(page.locator('ytcp-private-video-sharing-dialog tp-yt-paper-dialog'));
+  const dialog = await waitForVisibleLocator(candidates, {
+    attempts: SHARE_DIALOG_APPEAR_ATTEMPTS,
+    intervalMs: LOCATOR_RETRY_INTERVAL_MS,
+  });
+  if (dialog) {
+    return dialog;
+  }
+
+  throw new Error('Could not find private share dialog');
+}
+
+async function resolveInviteeInput(dialog) {
+  const candidates = [];
+  for (const label of UI.inviteeInputLabels) {
+    candidates.push(dialog.getByRole('textbox', { name: label }));
+    candidates.push(dialog.getByLabel(label));
+  }
+
+  candidates.push(dialog.locator('ytcp-chip-bar input.text-input'));
+  candidates.push(dialog.locator('input[aria-label="초대 대상자"]'));
+  candidates.push(dialog.locator('input[type="email"]'));
+
+  const input = await waitForVisibleLocator(candidates, {
+    attempts: SHARE_DIALOG_APPEAR_ATTEMPTS,
+    intervalMs: LOCATOR_RETRY_INTERVAL_MS,
+  });
+  if (input) {
+    return input;
+  }
+
+  throw new Error('Could not find invitee input in share dialog');
+}
+
+async function addEmails({ dialog, emails, logger, dryRun }) {
   if (dryRun) {
     logger.info(`Dry run: would add ${emails.length} emails`);
     return;
   }
 
-  let input = null;
-  for (const label of UI.emailInputLabels) {
-    const candidate = page.getByLabel(label).first();
-    if (await candidate.isVisible().catch(() => false)) {
-      input = candidate;
-      break;
-    }
-  }
-
-  if (!input) {
-    input = page.locator('input[type="email"], input[aria-label*="mail" i]').first();
-  }
-
-  if (!(await input.isVisible().catch(() => false))) {
-    throw new Error('Could not find email input in share dialog');
-  }
+  const input = await resolveInviteeInput(dialog);
 
   for (const email of emails) {
     await input.fill(email);
@@ -137,14 +228,14 @@ async function addEmails({ page, emails, logger, dryRun }) {
   }
 }
 
-async function setNotifyEmail({ page, disableEmailNotification, logger, dryRun }) {
+async function setNotifyEmail({ dialog, disableEmailNotification, logger, dryRun }) {
   if (dryRun) {
     logger.info(`Dry run: would set disableEmailNotification=${disableEmailNotification}`);
     return;
   }
 
   for (const label of UI.notifyCheckboxLabels) {
-    const checkbox = page.getByRole('checkbox', { name: label }).first();
+    const checkbox = dialog.getByRole('checkbox', { name: label }).first();
     if (await checkbox.isVisible().catch(() => false)) {
       const checked = await checkbox.isChecked().catch(() => null);
       const shouldBeChecked = !disableEmailNotification;
@@ -159,19 +250,25 @@ async function setNotifyEmail({ page, disableEmailNotification, logger, dryRun }
   logger.warn('Notification checkbox not found; skipped');
 }
 
-async function commitSave({ page, dryRun, logger }) {
+async function commitSave({ dialog, dryRun, logger }) {
   if (dryRun) {
     logger.info('Dry run: skipped save action');
     return;
   }
 
   for (const pattern of UI.saveButtons) {
-    const btn = page.getByRole('button', { name: pattern }).first();
-    if (await btn.isVisible().catch(() => false)) {
-      await btn.click();
-      logger.info('Saved sharing settings');
-      return;
+    const btn = dialog.getByRole('button', { name: pattern }).first();
+    if (!(await btn.isVisible().catch(() => false))) {
+      continue;
     }
+
+    if (!(await btn.isEnabled().catch(() => false))) {
+      continue;
+    }
+
+    await btn.click();
+    logger.info('Saved sharing settings');
+    return;
   }
 
   logger.warn('Could not find save/done button');
@@ -179,7 +276,7 @@ async function commitSave({ page, dryRun, logger }) {
 
 async function processVideo({ page, payload, videoId }) {
   const { logger } = payload;
-  const url = `${STUDIO_VIDEO_EDIT_URL}/${encodeURIComponent(videoId)}/edit`;
+  const url = withStudioBrowserApproval(`${STUDIO_VIDEO_EDIT_URL}/${encodeURIComponent(videoId)}/edit`);
   logger.info(`Opening Studio page for video ${videoId}`);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
   await assertStudioAuthenticated(page);
@@ -197,28 +294,28 @@ async function processVideo({ page, payload, videoId }) {
 
   if (!privateFound) {
     logger.warn('Private indicator not explicitly found, continuing cautiously');
-    await openShareDialog(page, logger);
-    await addEmails({ page, emails: payload.emails, logger, dryRun: payload.dryRun });
+    const shareDialog = await openShareDialog(page, logger);
+    await addEmails({ dialog: shareDialog, emails: payload.emails, logger, dryRun: payload.dryRun });
     await setNotifyEmail({
-      page,
+      dialog: shareDialog,
       disableEmailNotification: payload.disableEmailNotification,
       logger,
       dryRun: payload.dryRun,
     });
-    await commitSave({ page, dryRun: payload.dryRun, logger });
+    await commitSave({ dialog: shareDialog, dryRun: payload.dryRun, logger });
     return buildSuccessResult({ videoId, payload });
   }
 
   logger.info('Private visibility indicator found');
-  await openShareDialog(page, logger);
-  await addEmails({ page, emails: payload.emails, logger, dryRun: payload.dryRun });
+  const shareDialog = await openShareDialog(page, logger);
+  await addEmails({ dialog: shareDialog, emails: payload.emails, logger, dryRun: payload.dryRun });
   await setNotifyEmail({
-    page,
+    dialog: shareDialog,
     disableEmailNotification: payload.disableEmailNotification,
     logger,
     dryRun: payload.dryRun,
   });
-  await commitSave({ page, dryRun: payload.dryRun, logger });
+  await commitSave({ dialog: shareDialog, dryRun: payload.dryRun, logger });
 
   return buildSuccessResult({ videoId, payload });
 }
@@ -238,7 +335,10 @@ async function runYoutubeStudioShare(job, options) {
   const results = [];
 
   try {
-    await page.goto(STUDIO_HOME_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
+    await page.goto(withStudioBrowserApproval(STUDIO_HOME_URL), {
+      waitUntil: 'domcontentloaded',
+      timeout: PAGE_TIMEOUT_MS,
+    });
     await assertStudioAuthenticated(page);
     job.addLog('info', 'Opened Studio home page');
 
