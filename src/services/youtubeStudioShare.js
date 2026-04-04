@@ -17,13 +17,15 @@ const STUDIO_HOME_URL = 'https://studio.youtube.com/';
 const STUDIO_VIDEO_EDIT_URL = 'https://studio.youtube.com/video';
 const STUDIO_BROWSER_APPROVAL_QUERY = 'approve_browser_access=true';
 const PAGE_TIMEOUT_MS = 60000;
-const PANEL_WAIT_MS = 1500;
 const LOCATOR_RETRY_INTERVAL_MS = 500;
+const VISIBILITY_CARD_APPEAR_ATTEMPTS = 24;
 const SHARE_DIALOG_TRIGGER_ATTEMPTS = 6;
 const SHARE_DIALOG_APPEAR_ATTEMPTS = 6;
 const DRY_RUN_ADDED_COUNT = 0;
 const DEFAULT_ADDED_COUNT = 0;
 const GOOGLE_ACCOUNTS_HOST = 'accounts.google.com';
+const VISIBILITY_SECTION_SELECTOR = 'ytcp-video-metadata-visibility';
+const VISIBILITY_SELECT_BUTTON_SELECTOR = `${VISIBILITY_SECTION_SELECTOR} #select-button`;
 
 /**
  * Studio 접근 승인 쿼리를 URL에 보장한다.
@@ -144,6 +146,58 @@ async function waitForVisibleLocator(locatorCandidates, { attempts = 1, interval
 }
 
 /**
+ * 비디오 편집 화면의 공개 상태 카드 후보를 만든다.
+ * 렌더링 완료 여부를 확인할 때 컨테이너와 버튼/텍스트 후보를 함께 탐색한다.
+ */
+function buildVisibilityCardCandidates(page) {
+  const candidates = [page.locator(VISIBILITY_SECTION_SELECTOR)];
+  for (const pattern of UI.visibilityButtons) {
+    candidates.push(page.getByText(pattern));
+  }
+
+  return candidates;
+}
+
+/**
+ * 비디오 편집 화면의 공개 상태 패널 진입 후보를 만든다.
+ * 실제 클릭 가능한 버튼과 링크만 추려서 패널을 열 때 사용한다.
+ */
+function buildVisibilityEntryCandidates(page) {
+  const candidates = [page.locator(VISIBILITY_SELECT_BUTTON_SELECTOR)];
+  for (const pattern of UI.visibilityButtons) {
+    candidates.push(page.getByRole('button', { name: pattern }));
+    candidates.push(page.getByRole('link', { name: pattern }));
+  }
+
+  return candidates;
+}
+
+/**
+ * 비디오 편집 화면의 공개 상태 카드가 렌더링될 때까지 기다린다.
+ * Studio shell만 뜬 상태에서 다음 단계로 넘어가지 않게 막을 때 사용한다.
+ */
+async function waitForVisibilityCard(page, logger) {
+  const candidates = buildVisibilityCardCandidates(page);
+
+  for (let attempt = 0; attempt < VISIBILITY_CARD_APPEAR_ATTEMPTS; attempt += 1) {
+    await assertStudioAuthenticated(page);
+    const visible = await firstVisible(candidates);
+    if (visible) {
+      logger.info('Visibility card is ready');
+      return visible;
+    }
+
+    if (attempt === VISIBILITY_CARD_APPEAR_ATTEMPTS - 1) {
+      break;
+    }
+
+    await wait(LOCATOR_RETRY_INTERVAL_MS);
+  }
+
+  throw new Error('Could not find visibility card in video editor');
+}
+
+/**
  * 실패 분석용 screenshot과 HTML을 저장한다.
  * 비디오별 자동화 실패 시점의 화면 상태를 디버깅 가능하게 남길 때 사용한다.
  */
@@ -177,18 +231,10 @@ async function assertStudioAuthenticated(page) {
  * 텍스트와 role이 locale마다 달라질 수 있어 여러 locator 후보를 순차 탐색한다.
  */
 async function openVisibilityPanel(page, logger) {
-  const candidates = [];
-  for (const pattern of UI.visibilityButtons) {
-    candidates.push(page.getByRole('button', { name: pattern }));
-    candidates.push(page.getByRole('link', { name: pattern }));
-    candidates.push(page.getByText(pattern));
-  }
-
-  candidates.unshift(page.locator('ytcp-video-metadata-visibility #select-button'));
+  const candidates = buildVisibilityEntryCandidates(page);
   const button = await clickVisibleLocator(candidates);
   if (!button) {
-    logger.warn('Visibility entry point not found; continuing');
-    return;
+    throw new Error('Could not open visibility section');
   }
 
   await page.waitForTimeout(LOCATOR_RETRY_INTERVAL_MS);
@@ -352,8 +398,7 @@ async function processVideo({ page, payload, videoId }) {
   logger.info(`Opening Studio page for video ${videoId}`);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT_MS });
   await assertStudioAuthenticated(page);
-
-  await page.waitForTimeout(PANEL_WAIT_MS);
+  await waitForVisibilityCard(page, logger);
   await openVisibilityPanel(page, logger);
 
   let privateFound = false;
