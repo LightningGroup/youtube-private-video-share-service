@@ -148,6 +148,30 @@ AGENT_RUN_ONCE=true npm run agent
 7. 에이전트가 `claim-and-run`으로 작업을 가져가 실행
 8. 서버가 최종 상태와 결과를 저장
 
+## YouTube Studio 공유 자동화
+
+`src/services/youtubeStudioShare.js`는 저장된 `storageState`를 사용해 YouTube Studio에 진입하고,
+비공개 영상의 공유 대상 이메일을 추가하는 Playwright 자동화 서비스다.
+
+주요 작업 순서:
+
+1. Studio 홈으로 이동하고 현재 세션이 유효한지 확인한다.
+2. 각 `videoId`의 편집 화면으로 이동한다.
+3. 가시성 패널과 비공개 공유 다이얼로그를 연다.
+4. 공유 대상 이메일을 추가한다.
+5. 이메일 알림 발송 여부를 설정한다.
+6. 저장 버튼을 눌러 변경을 반영한다.
+7. 실패한 경우 screenshot과 HTML artifact를 저장한다.
+
+자동화 전략:
+
+- 단일 selector에 고정하지 않고 role 기반 locator, 텍스트 패턴, CSS fallback을 순차적으로 시도한다.
+- locale 차이를 흡수하기 위해 영문/한글 패턴을 함께 사용한다.
+- `dryRun` 모드에서는 실제 입력과 저장 대신 예정된 작업만 로그로 기록한다.
+- Google 로그인 화면으로 이동하면 재인증이 필요하다고 판단한다.
+
+상세 locator 전략과 요소별 fallback은 `docs/youtube-studio-share.md`를 참고한다.
+
 ## 요청 예시
 
 ### connection 생성
@@ -202,7 +226,8 @@ curl -X POST "http://localhost:3000/api/agent/jobs/claim" \
 │  ├─ config.js
 │  └─ services
 ├─ docs
-│  └─ mvp-remote-session-architecture.md
+│  ├─ mvp-remote-session-architecture.md
+│  └─ youtube-studio-share.md
 ├─ scripts
 │  └─ interactiveLogin.js
 ├─ src

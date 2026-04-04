@@ -25,6 +25,10 @@ const DRY_RUN_ADDED_COUNT = 0;
 const DEFAULT_ADDED_COUNT = 0;
 const GOOGLE_ACCOUNTS_HOST = 'accounts.google.com';
 
+/**
+ * Studio 접근 승인 쿼리를 URL에 보장한다.
+ * Studio 편집 화면 진입 전에 브라우저 승인 파라미터를 붙일 때 사용한다.
+ */
 function withStudioBrowserApproval(url) {
   if (url.includes(STUDIO_BROWSER_APPROVAL_QUERY)) {
     return url;
@@ -34,12 +38,20 @@ function withStudioBrowserApproval(url) {
   return `${url}${separator}${STUDIO_BROWSER_APPROVAL_QUERY}`;
 }
 
+/**
+ * 재로그인이 필요한 상황을 표현하는 전용 에러를 만든다.
+ * Google 계정 로그인 화면으로 튕겼을 때 상위 흐름에서 구분하기 위해 사용한다.
+ */
 function buildAuthenticationRequiredError(message) {
   const error = new Error(message);
   error.code = 'AUTHENTICATION_REQUIRED';
   return error;
 }
 
+/**
+ * 비디오 처리 성공 결과를 API 응답 형태로 정리한다.
+ * dry-run 여부에 따라 추가 인원 수와 메시지를 다르게 기록할 때 사용한다.
+ */
 function buildSuccessResult({ videoId, payload }) {
   return {
     videoId,
@@ -50,18 +62,30 @@ function buildSuccessResult({ videoId, payload }) {
   };
 }
 
+/**
+ * 로그에 남길 이메일을 부분 마스킹한다.
+ * 초대 대상 정보를 완전히 노출하지 않고 작업 로그를 남길 때 사용한다.
+ */
 function maskEmail(email) {
   const [name, domain] = email.split('@');
   if (!domain) return '***';
   return `${name.slice(0, 2)}***@${domain}`;
 }
 
+/**
+ * 지정한 시간만큼 대기한다.
+ * UI가 즉시 갱신되지 않는 구간에서 재시도 간격을 둘 때 사용한다.
+ */
 function wait(durationMs) {
   return new Promise((resolve) => {
     setTimeout(resolve, durationMs);
   });
 }
 
+/**
+ * locator 후보 중 현재 화면에 보이는 첫 요소를 찾는다.
+ * locale 차이로 여러 후보를 준비한 뒤 실제 노출된 요소를 선택할 때 사용한다.
+ */
 async function firstVisible(locatorCandidates) {
   for (const locator of locatorCandidates) {
     if (await locator.first().isVisible().catch(() => false)) {
@@ -71,6 +95,10 @@ async function firstVisible(locatorCandidates) {
   return null;
 }
 
+/**
+ * 보이는 locator 후보를 클릭하거나 Enter로 대체 실행한다.
+ * 버튼과 링크가 섞여 있는 Studio UI에서 가장 먼저 동작하는 진입점을 찾을 때 사용한다.
+ */
 async function clickVisibleLocator(locatorCandidates) {
   for (const locator of locatorCandidates) {
     const target = locator.first();
@@ -94,6 +122,10 @@ async function clickVisibleLocator(locatorCandidates) {
   return null;
 }
 
+/**
+ * 일정 횟수 동안 보이는 locator가 나타날 때까지 재시도한다.
+ * 비동기 렌더링되는 Studio 패널과 다이얼로그를 기다릴 때 사용한다.
+ */
 async function waitForVisibleLocator(locatorCandidates, { attempts = 1, intervalMs = 0 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const visible = await firstVisible(locatorCandidates);
@@ -111,6 +143,10 @@ async function waitForVisibleLocator(locatorCandidates, { attempts = 1, interval
   return null;
 }
 
+/**
+ * 실패 분석용 screenshot과 HTML을 저장한다.
+ * 비디오별 자동화 실패 시점의 화면 상태를 디버깅 가능하게 남길 때 사용한다.
+ */
 async function saveArtifacts({ page, jobId, videoId, prefix }) {
   const dir = path.join(config.artifactsDir, jobId);
   await ensureDir(dir);
@@ -123,6 +159,10 @@ async function saveArtifacts({ page, jobId, videoId, prefix }) {
   return [png, html];
 }
 
+/**
+ * 현재 페이지가 Google 로그인 화면으로 이동했는지 확인한다.
+ * 세션 만료를 빠르게 감지해서 재인증 플로우로 전환할 때 사용한다.
+ */
 async function assertStudioAuthenticated(page) {
   const currentUrl = page.url();
   if (!currentUrl.includes(GOOGLE_ACCOUNTS_HOST)) {
@@ -132,6 +172,10 @@ async function assertStudioAuthenticated(page) {
   throw buildAuthenticationRequiredError('Google authentication is required again');
 }
 
+/**
+ * 비디오 편집 화면의 가시성 패널 진입점을 연다.
+ * 텍스트와 role이 locale마다 달라질 수 있어 여러 locator 후보를 순차 탐색한다.
+ */
 async function openVisibilityPanel(page, logger) {
   const candidates = [];
   for (const pattern of UI.visibilityButtons) {
@@ -151,6 +195,10 @@ async function openVisibilityPanel(page, logger) {
   logger.info('Opened visibility section');
 }
 
+/**
+ * 비공개 공유 다이얼로그를 연다.
+ * 공유 진입 버튼을 찾은 뒤 다이얼로그가 실제로 나타날 때까지 기다릴 때 사용한다.
+ */
 async function openShareDialog(page, logger) {
   const candidates = [];
   for (const p of UI.sharePrivatelyEntry) {
@@ -173,6 +221,10 @@ async function openShareDialog(page, logger) {
   return dialog;
 }
 
+/**
+ * 현재 페이지에서 비공개 공유 다이얼로그 본체를 찾는다.
+ * title 기반 role 탐색이 실패하면 CSS locator를 fallback으로 사용한다.
+ */
 async function resolveShareDialog(page) {
   const candidates = [];
   for (const pattern of UI.shareDialogTitles) {
@@ -191,6 +243,10 @@ async function resolveShareDialog(page) {
   throw new Error('Could not find private share dialog');
 }
 
+/**
+ * 초대 대상 이메일 입력창을 찾는다.
+ * 접근성 label 우선 탐색 후 내부 input selector를 fallback으로 사용한다.
+ */
 async function resolveInviteeInput(dialog) {
   const candidates = [];
   for (const label of UI.inviteeInputLabels) {
@@ -213,6 +269,10 @@ async function resolveInviteeInput(dialog) {
   throw new Error('Could not find invitee input in share dialog');
 }
 
+/**
+ * 비공개 공유 다이얼로그에 이메일 목록을 추가한다.
+ * dry-run에서는 실제 입력 대신 예정된 추가 건수만 로그로 남긴다.
+ */
 async function addEmails({ dialog, emails, logger, dryRun }) {
   if (dryRun) {
     logger.info(`Dry run: would add ${emails.length} emails`);
@@ -228,6 +288,10 @@ async function addEmails({ dialog, emails, logger, dryRun }) {
   }
 }
 
+/**
+ * 이메일 알림 발송 여부를 다이얼로그 상태에 맞게 조정한다.
+ * 현재 체크 상태와 원하는 상태를 비교해 필요한 경우에만 토글한다.
+ */
 async function setNotifyEmail({ dialog, disableEmailNotification, logger, dryRun }) {
   if (dryRun) {
     logger.info(`Dry run: would set disableEmailNotification=${disableEmailNotification}`);
@@ -250,6 +314,10 @@ async function setNotifyEmail({ dialog, disableEmailNotification, logger, dryRun
   logger.warn('Notification checkbox not found; skipped');
 }
 
+/**
+ * 다이얼로그의 저장 또는 완료 버튼을 눌러 변경을 확정한다.
+ * dry-run에서는 실제 저장을 생략하고 로그만 기록한다.
+ */
 async function commitSave({ dialog, dryRun, logger }) {
   if (dryRun) {
     logger.info('Dry run: skipped save action');
@@ -274,6 +342,10 @@ async function commitSave({ dialog, dryRun, logger }) {
   logger.warn('Could not find save/done button');
 }
 
+/**
+ * 단일 비디오에 대한 비공개 공유 자동화를 수행한다.
+ * 편집 화면 진입부터 공유 다이얼로그 저장까지 한 비디오 단위 흐름을 담당한다.
+ */
 async function processVideo({ page, payload, videoId }) {
   const { logger } = payload;
   const url = withStudioBrowserApproval(`${STUDIO_VIDEO_EDIT_URL}/${encodeURIComponent(videoId)}/edit`);
